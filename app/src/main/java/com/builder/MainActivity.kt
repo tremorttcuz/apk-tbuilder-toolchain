@@ -175,6 +175,7 @@ class MainActivity : Activity(), EngineListener, TermActions {
         if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return
         if (!i.getBooleanExtra("autobuild", false)) return
         i.removeExtra("autobuild")
+        engine.debugOffline = i.getBooleanExtra("offline", false)
         val zip = i.getStringExtra("import")
         if (zip != null) {
             // импорт zip из папки приложения и сборка: для автоматических проверок

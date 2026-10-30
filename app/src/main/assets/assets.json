@@ -2,21 +2,24 @@
   {
     "name": "android.jar · API 35",
     "hint": "Фреймворк Android: нужен для линковки ресурсов",
-    "url": "https://github.com/Sable/android-platforms/raw/master/android-35/android.jar",
+    "url": "https://github.com/tremorttcuz/apk-tbuilder-toolchain/releases/download/toolchain-v1/android.jar-api35.jar",
     "path": "platforms/android.jar",
     "api": 35,
     "provides": [
       "android.jar"
+    ],
+    "fallbacks": [
+      "https://github.com/Sable/android-platforms/raw/master/android-35/android.jar"
     ]
   },
   {
     "name": "SDK-утилиты · aapt2, aapt, zipalign",
     "hint": "Статические бинарники под ваш процессор, ~14 МБ",
     "urls": {
-      "arm64-v8a": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-aarch64.zip",
-      "armeabi-v7a": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-arm.zip",
-      "x86_64": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-x86_64.zip",
-      "x86": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-x86.zip"
+      "arm64-v8a": "https://github.com/tremorttcuz/apk-tbuilder-toolchain/releases/download/toolchain-v1/sdk-tools-aarch64.zip",
+      "armeabi-v7a": "https://github.com/tremorttcuz/apk-tbuilder-toolchain/releases/download/toolchain-v1/sdk-tools-arm.zip",
+      "x86_64": "https://github.com/tremorttcuz/apk-tbuilder-toolchain/releases/download/toolchain-v1/sdk-tools-x86_64.zip",
+      "x86": "https://github.com/tremorttcuz/apk-tbuilder-toolchain/releases/download/toolchain-v1/sdk-tools-x86.zip"
     },
     "path": "sdk-tools.zip",
     "into": "sdk",
@@ -27,7 +30,13 @@
       "aapt2",
       "aapt",
       "zipalign"
-    ]
+    ],
+    "fallbackUrls": {
+      "arm64-v8a": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-aarch64.zip",
+      "armeabi-v7a": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-arm.zip",
+      "x86_64": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-x86_64.zip",
+      "x86": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-x86.zip"
+    }
   },
   {
     "name": "Компиляторы · Kotlin 2.1, Compose, Java, d8",

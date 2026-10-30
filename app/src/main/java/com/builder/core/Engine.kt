@@ -84,6 +84,8 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
     @Volatile var fixing = false; private set
     /** Что качается сейчас (для уведомления и экранов): список текущей докачки. */
     @Volatile var fixTodo: List<Fix> = emptyList(); private set
+    /** Только для проверок: сеть для Maven «отключена», сборка обязана обойтись кэшем. */
+    @Volatile var debugOffline = false
     @Volatile var lastFixFailed = false; private set
     private var fixStage: Stage? = null
     private var fixCur: Fix? = null
@@ -333,6 +335,14 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
 
     private fun dl(s: Stage): Dl = dlOf(s.title, s.spec)
 
+    /** Запасные адреса: список `fallbacks` и, если файл зависит от процессора, `fallbackUrls` по ABI. */
+    private fun fallbacksOf(sp: JObj): List<String> {
+        val out = ArrayList<String>()
+        out.addAll(sp.strList("fallbacks"))
+        sp.obj("fallbackUrls")?.let { u -> pf.abis.firstNotNullOfOrNull { u[it] as? String }?.let(out::add) }
+        return out
+    }
+
     private fun urlOf(sp: JObj): String {
         val urls = sp.obj("urls")
         return urls?.let { u -> pf.abis.firstNotNullOfOrNull { u[it] as? String } } ?: sp.str("url")
@@ -383,20 +393,33 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
                 }
             } }
         } else {
-        val host = runCatching { java.net.URL(d.url).host }.getOrDefault(d.url)
-        console.add(c("90", "↓ ${d.url}"))
-        s.detail = host
-        var lastLog = -10
-        Downloader { cancel }.fetch(d.url, d.dest, d.sha,
-            onRetry = { n, msg -> console.add(c("33", "  повтор $n: $msg")); s.detail = "повтор $n · $msg"; notifyStage(i, true) },
-            onProgress = { done, total, bps ->
-                s.progress = if (total > 0) done.toFloat() / total else -1f
-                s.detail = if (total > 0) "${Downloader.human(done)} / ${Downloader.human(total)}" + (if (bps > 0) " · ${Downloader.human(bps)}/с" else "")
-                else "${Downloader.human(done)}" + (if (bps > 0) " · ${Downloader.human(bps)}/с" else "")
-                val pct = if (total > 0) (done * 100 / total).toInt() else -1
-                if (pct >= 0 && pct >= lastLog + 25) { lastLog = pct - pct % 25; console.add(c("90", "  $pct% · ${s.detail}")) }
-                notifyStage(i)
-            })
+        // сначала основной источник (зеркало на GitHub автора), при сбое — запасные (исходные адреса файлов)
+        val candidates = listOf(d.url) + fallbacksOf(s.spec)
+        var failure: Exception? = null
+        for ((ci, u) in candidates.withIndex()) {
+            val host = runCatching { java.net.URL(u).host }.getOrDefault(u)
+            console.add(c("90", "↓ $u"))
+            s.detail = host
+            var lastLog = -10
+            try {
+                Downloader { cancel }.fetch(u, d.dest, d.sha,
+                    onRetry = { n, msg -> console.add(c("33", "  повтор $n: $msg")); s.detail = "повтор $n · $msg"; notifyStage(i, true) },
+                    onProgress = { done, total, bps ->
+                        s.progress = if (total > 0) done.toFloat() / total else -1f
+                        s.detail = if (total > 0) "${Downloader.human(done)} / ${Downloader.human(total)}" + (if (bps > 0) " · ${Downloader.human(bps)}/с" else "")
+                        else "${Downloader.human(done)}" + (if (bps > 0) " · ${Downloader.human(bps)}/с" else "")
+                        val pct = if (total > 0) (done * 100 / total).toInt() else -1
+                        if (pct >= 0 && pct >= lastLog + 25) { lastLog = pct - pct % 25; console.add(c("90", "  $pct% · ${s.detail}")) }
+                        notifyStage(i)
+                    })
+                failure = null; break
+            } catch (e: Cancelled) { throw e }
+            catch (e: Exception) {
+                failure = e
+                if (ci < candidates.size - 1) console.add(c("33", "  источник недоступен (${e.message}) — пробую запасной"))
+            }
+        }
+        failure?.let { throw it }
         }
         if (d.unzip) {
             s.progress = 0f
@@ -680,11 +703,13 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
         s.note = "${all.size} библиотек · ${Downloader.human(all.sumOf { it.file?.length() ?: 0L })}"
     }
 
+    private fun mavenRepos(): List<String> = if (debugOffline) listOf("http://127.0.0.1:9/offline") else listOf("https://dl.google.com/dl/android/maven2", "https://repo1.maven.org/maven2")
+
     private fun doDeps(s: Stage, i: Int) {
         probeVm()
         val gi = gradleInfo()
         val kt = hasCode("kt")
-        val mv = Maven(File(home, "m2"), { cancel }, { console.add(c("90", it)) }, { f, d -> s.progress = f; s.detail = d; notifyStage(i) }, fresh = freshLibs())
+        val mv = Maven(File(home, "m2"), { cancel }, { console.add(c("90", it)) }, { f, d -> s.progress = f; s.detail = d; notifyStage(i) }, fresh = freshLibs(), repos = mavenRepos())
         val direct = ArrayList<Maven.Coord>()
         for (d in gi?.deps.orEmpty()) {
             var co = mv.coord(d)

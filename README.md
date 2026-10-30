@@ -18,9 +18,9 @@ Android-приложение, которое собирает APK прямо н�
 **Что собирается на телефоне.** Приложения на Kotlin, Java и Jetpack Compose с зависимостями из Maven (Google Maven и Maven Central), ресурсами, ассетами и готовыми нативными библиотеками (`jniLibs/`). Подпись — схемы v1 и v2, собственный ключ RSA-2048 создаётся при первой сборке.
 
 **Что ставится при первом запуске** (всё отмечено по умолчанию, потом интернет не нужен):
-- `android.jar` API 35 и SDK-утилиты (aapt2, zipalign) — загрузка;
+- `android.jar` API 35 и SDK-утилиты (aapt2, zipalign) — загрузка из релиза `toolchain-v1` этого репозитория; если он недоступен, берутся исходные адреса (Sable/android-platforms, lzhiyong/android-sdk-tools);
 - **компиляторы** — встроены в приложение (`assets/jvm-tools.zip`, ~27 МБ): Kotlin 2.1 с плагином Compose, ecj (Java), d8. Они запускаются через `dalvikvm` (а если он недоступен — через `app_process`, куча до 256 МБ);
-- **библиотеки** (~80 МБ) — Compose BOM 2024.12, Material 3, иконки, Activity, Lifecycle, Navigation, AppCompat, Material Components, ConstraintLayout, DataStore, OkHttp, Gson, Coil, корутины. Остальные зависимости проекта докачиваются при первой сборке и остаются в кэше (`files/m2`).
+- **библиотеки** (~80 МБ) — Compose BOM 2024.12, Material 3, иконки, Activity, Lifecycle, Navigation, AppCompat, Material Components, ConstraintLayout, DataStore, OkHttp, Gson, Coil, корутины. Остальные зависимости проекта докачиваются при первой сборке и остаются в кэше (`files/m2`). Проверено: сборка с недоступным Maven проходит целиком из кэша.
 
 Зависимости читаются из `build.gradle(.kts)`, включая `platform("…bom…")` и версионный каталог `gradle/libs.versions.toml`. Версии без указания берутся из BOM; при конфликте побеждает наибольшая. AAR распаковываются, ресурсы библиотек компилируются один раз и кэшируются, манифесты библиотек сливаются в манифест приложения.
 
