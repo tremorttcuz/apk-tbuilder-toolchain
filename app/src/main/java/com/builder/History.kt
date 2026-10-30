@@ -186,6 +186,16 @@ class MountainChart(c: Context) : View(c) {
         }
     }
 
+    private val hi = Path()
+
+    /** Длина дуги, на которой нарисованная кривая проходит через координату x (x вдоль кривой монотонно растёт — поиск делением пополам). */
+    private fun distAtX(pm: PathMeasure, x: Float): Float {
+        val pt = FloatArray(2)
+        var lo = 0f; var hiD = pm.length
+        repeat(26) { val mid = (lo + hiD) / 2; pm.getPosTan(mid, pt, null); if (pt[0] < x) lo = mid else hiD = mid }
+        return (lo + hiD) / 2
+    }
+
     /** Высота кривой в дробной позиции индекса (для кружков на концах выделенного отрезка). */
     private fun yAt(v: FloatArray, max: Float, pos: Float): Float {
         val n = v.size; if (n == 0) return bot
@@ -256,30 +266,40 @@ class MountainChart(c: Context) : View(c) {
         }
         cv.restore()
 
-        // выделенный отрезок: свет по кривой на половину шага в каждую сторону и кружки на концах
+        // выделенный отрезок: свет по кривой на половину шага в каждую сторону и кружки на концах.
+        // Отрезок вырезается из самой нарисованной кривой (PathMeasure), а не обрезается вертикальной линией:
+        // концы получаются скруглёнными и перпендикулярными кривой, а кружки стоят ровно на ней.
         if (focus > 0.01f && selected >= 0 && n > 1) {
             val a = (selPos - .5f).coerceAtLeast(0f); val b = (selPos + .5f).coerceAtMost((n - 1).toFloat())
             val xa = px(0, n) + (r - l) * a / (n - 1); val xb = px(0, n) + (r - l) * b / (n - 1)
-            cv.save(); cv.clipRect(xa, 0f, xb, bot + context.pxf(6f))
-            p.style = Paint.Style.STROKE; p.strokeWidth = context.pxf(3.5f); p.color = Pal.ACCENT; p.alpha = (255 * focus).toInt()
-            cv.drawPath(line, p)
-            if (hasFail) { p.strokeWidth = context.pxf(2.2f); p.color = Pal.ERROR; p.alpha = (255 * focus).toInt(); cv.drawPath(fail, p) }
+            val sx = px(0, n) + (r - l) * selPos / (n - 1)
+            val pmLine = PathMeasure(line, false)
+            val da = distAtX(pmLine, xa); val db = distAtX(pmLine, xb)
+
+            p.style = Paint.Style.STROKE; p.strokeCap = Paint.Cap.ROUND; p.strokeJoin = Paint.Join.ROUND
+            p.strokeWidth = context.pxf(3.5f); p.color = Pal.ACCENT; p.alpha = (255 * focus).toInt()
+            hi.reset(); pmLine.getSegment(da, db, hi, true); cv.drawPath(hi, p)
+            if (hasFail) {
+                val pmFail = PathMeasure(fail, false)
+                p.strokeWidth = context.pxf(2.2f); p.color = Pal.ERROR; p.alpha = (255 * focus).toInt()
+                hi.reset(); pmFail.getSegment(distAtX(pmFail, xa), distAtX(pmFail, xb), hi, true); cv.drawPath(hi, p)
+            }
             p.alpha = 255
-            cv.restore()
 
             // пунктирная вертикаль через выбранную точку
-            val sx = px(0, n) + (r - l) * selPos / (n - 1)
             p.style = Paint.Style.STROKE; p.strokeWidth = context.pxf(1f); p.color = Pal.GLOW; p.alpha = (110 * focus).toInt()
             p.pathEffect = DashPathEffect(floatArrayOf(context.pxf(2f), context.pxf(3f)), 0f)
             cv.drawLine(sx, top - context.pxf(4f), sx, bot, p); p.pathEffect = null; p.alpha = 255
 
-            for (pos in floatArrayOf(a, b)) {
-                val cx = px(0, n) + (r - l) * pos / (n - 1); val cy = yAt(vals, max, pos)
-                p.style = Paint.Style.FILL; p.color = Pal.BG; cv.drawCircle(cx, cy, context.pxf(5f) * focus, p)
-                p.style = Paint.Style.STROKE; p.strokeWidth = context.pxf(2f); p.color = Pal.ACCENT; cv.drawCircle(cx, cy, context.pxf(5f) * focus, p)
+            // кружки строго на кривой: берём точку по длине дуги
+            val pt = FloatArray(2)
+            for (d in floatArrayOf(da, db)) {
+                pmLine.getPosTan(d, pt, null)
+                p.style = Paint.Style.FILL; p.color = Pal.BG; cv.drawCircle(pt[0], pt[1], context.pxf(5f) * focus, p)
+                p.style = Paint.Style.STROKE; p.strokeWidth = context.pxf(2f); p.color = Pal.ACCENT; cv.drawCircle(pt[0], pt[1], context.pxf(5f) * focus, p)
             }
-            val cy = yAt(vals, max, selPos)
-            p.style = Paint.Style.FILL; p.color = Pal.GLOW; cv.drawCircle(sx, cy, context.pxf(3.2f) * focus, p)
+            pmLine.getPosTan(distAtX(pmLine, sx), pt, null)
+            p.style = Paint.Style.FILL; p.color = Pal.GLOW; cv.drawCircle(pt[0], pt[1], context.pxf(3.2f) * focus, p)
 
             // подсказка
             val text = com.builder.core.L.tr(tip(selected.coerceIn(0, n - 1)))
