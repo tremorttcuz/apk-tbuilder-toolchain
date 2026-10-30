@@ -442,7 +442,7 @@ class MainActivity : Activity(), EngineListener, TermActions {
         fixCard.bind(engine.fixes, engine.fixing); if (engine.fixes.isNotEmpty()) fixShown = true
         val r = engine.result
         if (r != null && !engine.running && engine.lastError == null) card.show(r, false)
-        if (engine.running) { ui.removeCallbacks(ticker); ui.post(ticker); startResources() }
+        if (engine.running) { ui.removeCallbacks(ticker); ui.post(ticker); startResources(); startStick() }
     }
 
     override fun onStop() {
@@ -464,7 +464,7 @@ class MainActivity : Activity(), EngineListener, TermActions {
 
     override fun onRun(running: Boolean) {
         ui.post {
-            if (running) { cancelled = false; lastFill = -1f; card.hideNow(); fixCard.hideNow(); fixShown = false; chain.begin(); showHero(false, true); ui.removeCallbacks(ticker); ui.post(ticker); startResources() }
+            if (running) { cancelled = false; lastFill = -1f; card.hideNow(); fixCard.hideNow(); fixShown = false; chain.begin(); startStick(); showHero(false, true); ui.removeCallbacks(ticker); ui.post(ticker); startResources() }
             updateControls()
         }
     }
@@ -605,15 +605,36 @@ class MainActivity : Activity(), EngineListener, TermActions {
         else heroNote.iconStart(null)
     }
 
-    private fun follow(v: View) {
-        if (System.currentTimeMillis() - lastTouch < 3000) return
-        glideTo((v.top - px(150)).coerceAtLeast(0), 420)
+    /**
+     * Во время сборки (и ещё пару секунд после) список всё время тянется к самому низу: каждый кадр доезжаем до актуального
+     * конца — он растёт, когда раскрываются ошибка, подсказки и карточки. Двигаемся только вниз; если пользователь сам
+     * листает, на 2,5 секунды уступаем ему.
+     */
+    private var stickUntil = 0L
+    private var sticking = false
+    private val stick = object : Runnable {
+        override fun run() {
+            val now = System.currentTimeMillis()
+            if (!engine.running && now > stickUntil) { sticking = false; return }
+            if (now - lastTouch > 2500) {
+                val child = scroll.getChildAt(0)
+                val max = ((child?.height ?: 0) - scroll.height).coerceAtLeast(0)
+                val d = max - scroll.scrollY
+                if (d > 1) scroll.scrollBy(0, (d * 0.2f).toInt().coerceIn(2, d))
+            }
+            scroll.postOnAnimation(this)
+        }
     }
 
-    /** Докручивает до самого низа после того, как отработают анимации раскрытия (высота контента ещё растёт). */
-    private fun scrollToEnd(after: Long) {
-        for (d in longArrayOf(after, after + 450)) scroll.postDelayed({ if (!isFinishing) glideTo(Int.MAX_VALUE / 2, 420, true) }, d)
+    private fun startStick(extraMs: Long = 0) {
+        stickUntil = maxOf(stickUntil, System.currentTimeMillis() + extraMs)
+        if (!sticking) { sticking = true; scroll.postOnAnimation(stick) }
     }
+
+    private fun follow(@Suppress("UNUSED_PARAMETER") v: View) = startStick()
+
+    /** После окончания сборки ещё немного держим низ: высота списка дорастает вместе с анимациями раскрытия. */
+    private fun scrollToEnd(after: Long) = startStick(after + 1800)
 
     /** Плавная прокрутка с замедлением в конце; мелкие сдвиги пропускаются, чтобы не дёргать. */
     private fun glideTo(y: Int, ms: Long, force: Boolean = false) {
