@@ -1,0 +1,87 @@
+[
+  {
+    "name": "android.jar · API 35",
+    "hint": "Фреймворк Android: нужен для линковки ресурсов",
+    "url": "https://github.com/Sable/android-platforms/raw/master/android-35/android.jar",
+    "path": "platforms/android.jar",
+    "api": 35,
+    "provides": [
+      "android.jar"
+    ]
+  },
+  {
+    "name": "SDK-утилиты · aapt2, aapt, zipalign",
+    "hint": "Статические бинарники под ваш процессор, ~14 МБ",
+    "urls": {
+      "arm64-v8a": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-aarch64.zip",
+      "armeabi-v7a": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-arm.zip",
+      "x86_64": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-x86_64.zip",
+      "x86": "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-x86.zip"
+    },
+    "path": "sdk-tools.zip",
+    "into": "sdk",
+    "unzip": true,
+    "exec": true,
+    "check": "sdk/build-tools/aapt2",
+    "provides": [
+      "aapt2",
+      "aapt",
+      "zipalign"
+    ]
+  },
+  {
+    "name": "Компиляторы · Kotlin 2.1, Compose, Java, d8",
+    "hint": "Встроены в приложение: компилируют Kotlin/Compose и Java прямо на телефоне, ~27 МБ",
+    "asset": "jvm-tools.zip",
+    "size": 27303453,
+    "path": "jvm-tools-v2.zip",
+    "unzip": true,
+    "into": "jvm",
+    "check": "jvm/kotlinc.jar",
+    "provides": [
+      "kotlinc",
+      "composec",
+      "d8dex",
+      "ecjdex"
+    ]
+  },
+  {
+    "name": "Библиотеки · Compose, AndroidX, Kotlin",
+    "hint": "Скачиваются один раз (~80 МБ): дальше сборка работает без интернета",
+    "maven": [
+      "androidx.activity:activity-compose:1.10.0",
+      "androidx.activity:activity-ktx:1.10.0",
+      "androidx.core:core-ktx:1.15.0",
+      "androidx.appcompat:appcompat:1.7.0",
+      "com.google.android.material:material:1.12.0",
+      "androidx.constraintlayout:constraintlayout:2.2.0",
+      "androidx.compose.ui:ui",
+      "androidx.compose.ui:ui-graphics",
+      "androidx.compose.ui:ui-tooling-preview",
+      "androidx.compose.ui:ui-text-google-fonts",
+      "androidx.compose.foundation:foundation",
+      "androidx.compose.animation:animation",
+      "androidx.compose.material3:material3",
+      "androidx.compose.material:material-icons-extended",
+      "androidx.lifecycle:lifecycle-runtime-ktx:2.8.7",
+      "androidx.lifecycle:lifecycle-runtime-compose:2.8.7",
+      "androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7",
+      "androidx.navigation:navigation-compose:2.8.5",
+      "androidx.datastore:datastore-preferences:1.1.1",
+      "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0",
+      "com.squareup.okhttp3:okhttp:4.12.0",
+      "com.google.code.gson:gson:2.11.0",
+      "io.coil-kt:coil-compose:2.7.0",
+      "com.android.tools.build:apksig:8.5.2"
+    ],
+    "boms": [
+      "androidx.compose:compose-bom:2024.12.01"
+    ],
+    "size": 80000000,
+    "path": "maven-prefetch.done",
+    "check": "maven-prefetch.done",
+    "provides": [
+      "maven"
+    ]
+  }
+]

@@ -1,0 +1,100 @@
+{
+  "version": 3,
+  "stages": [
+    {
+      "op": "doctor",
+      "name": "Проверка окружения",
+      "hint": "инструменты запускаются, проект на месте, хватает места"
+    },
+    {
+      "op": "clean",
+      "name": "Подготовка",
+      "hint": "чистая папка build"
+    },
+    {
+      "op": "deps",
+      "name": "Зависимости",
+      "hint": "Maven: скачивание библиотек (кэш между сборками)",
+      "when": [
+        "jvm"
+      ]
+    },
+    {
+      "op": "manifest",
+      "name": "Манифест",
+      "hint": "package, версии, слияние манифестов библиотек"
+    },
+    {
+      "op": "aapt-compile",
+      "name": "Компиляция ресурсов",
+      "hint": "aapt2 compile · приложение и библиотеки",
+      "requires": [
+        "aapt2"
+      ],
+      "tip": "Ошибка в res/: aapt2 назвал файл и строку выше — исправь XML и запусти снова"
+    },
+    {
+      "op": "aapt-link",
+      "name": "Линковка ресурсов",
+      "hint": "aapt2 link → base.apk и R-классы",
+      "requires": [
+        "aapt2",
+        "android.jar"
+      ],
+      "tip": "Проверь AndroidManifest.xml: нужен package (или namespace в build.gradle) и корректные ссылки @string/…, @drawable/…"
+    },
+    {
+      "op": "kotlinc",
+      "name": "Kotlin → .class",
+      "hint": "Kotlin 2.1 · Compose-плагин при необходимости",
+      "when": [
+        "code:kt"
+      ],
+      "requires": [
+        "kotlinc"
+      ]
+    },
+    {
+      "op": "javac",
+      "name": "Java → .class",
+      "hint": "ecj · Java и R-классы",
+      "when": [
+        "jvm"
+      ],
+      "requires": [
+        "ecjdex"
+      ]
+    },
+    {
+      "op": "dex",
+      "name": "Код → DEX",
+      "hint": "d8 · classes.dex из кода и библиотек",
+      "when": [
+        "jvm"
+      ],
+      "requires": [
+        "d8dex"
+      ]
+    },
+    {
+      "op": "pack",
+      "name": "Сборка APK",
+      "hint": "ресурсы + dex + нативные библиотеки"
+    },
+    {
+      "op": "sign",
+      "name": "Подпись",
+      "hint": "RSA-2048 · SHA-256 · схемы v1 и v2"
+    },
+    {
+      "op": "verify",
+      "name": "Проверка подписи",
+      "hint": "дайджесты файлов и сертификат"
+    },
+    {
+      "op": "publish",
+      "name": "Готовый APK",
+      "hint": "копия в out/, размер и контрольная сумма"
+    }
+  ]
+}
