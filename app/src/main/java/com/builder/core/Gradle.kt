@@ -13,6 +13,10 @@ class GradleInfo(
     val compileOnly: List<String> = emptyList(),
     /** Плагины/процессоры, которые на телефоне не выполняются (kapt, ksp, annotationProcessor). */
     val processors: List<String> = emptyList(),
+    /** JVM-таргет Kotlin из проекта (`kotlinOptions.jvmTarget`, `jvmToolchain`): «1.8», «11», «17»… null — не задан. */
+    val jvmTarget: String? = null,
+    /** Уровень Java из проекта (`sourceCompatibility`/`targetCompatibility`, `JavaLanguageVersion`). null — не задан. */
+    val javaTarget: String? = null,
 ) {
     fun toJson(): String {
         val m = LinkedHashMap<String, Any?>()
@@ -21,6 +25,7 @@ class GradleInfo(
         minSdk?.let { m["minSdk"] = it.toDouble() }; targetSdk?.let { m["targetSdk"] = it.toDouble() }; compileSdk?.let { m["compileSdk"] = it.toDouble() }
         m["deps"] = deps; m["kotlin"] = kotlin; m["placeholders"] = placeholders
         m["boms"] = boms; m["compileOnly"] = compileOnly; m["processors"] = processors
+        jvmTarget?.let { m["jvmTarget"] = it }; javaTarget?.let { m["javaTarget"] = it }
         return Json.stringify(m)
     }
 
@@ -35,6 +40,7 @@ class GradleInfo(
                 strs(o, "deps"), o["kotlin"] as? Boolean ?: false,
                 (o["placeholders"] as? Map<*, *>)?.entries?.associate { it.key.toString() to it.value.toString() } ?: emptyMap(),
                 strs(o, "boms"), strs(o, "compileOnly"), strs(o, "processors"),
+                o["jvmTarget"] as? String, o["javaTarget"] as? String,
             )
         } catch (_: Exception) { null }
     }
@@ -124,6 +130,29 @@ object Gradle {
         }
     }
 
+    /** «JVM_17», «17», «1.8», «1_8» → «1.8» / «11» / «17»; null, если это не версия. */
+    fun normJvm(v: String?): String? {
+        val t = v?.trim()?.trim('"', '\'')?.replace('_', '.') ?: return null
+        val n = (if (t.startsWith("1.")) t.removePrefix("1.") else t).toIntOrNull() ?: return null
+        return if (n <= 8) "1.$n" else n.toString()
+    }
+
+    /** Номер версии: «1.8» → 8, «17» → 17. */
+    fun jvmMajor(v: String): Int = v.removePrefix("1.").toIntOrNull() ?: 8
+
+    private val VER = "(?:JvmTarget\\.JVM_|JavaVersion\\.VERSION_)?(\\d+(?:[._]\\d+)?)"
+
+    /** JVM-таргеты из build.gradle(.kts): Kotlin (jvmTarget, jvmToolchain) и Java (source/targetCompatibility, JavaLanguageVersion). */
+    private fun jvmTargets(s: String, vars: Map<String, String>): Pair<String?, String?> {
+        val toolchain = Regex("jvmToolchain\\s*\\(\\s*(\\d+)").find(s)?.groupValues?.get(1)
+            ?: Regex("JavaLanguageVersion\\.of\\(\\s*(\\d+)").find(s)?.groupValues?.get(1)
+        val kt = Regex("\\bjvmTarget\\b\\s*(?:=|\\.set\\(|\\.convention\\()\\s*[\"']?\\s*$VER").find(s)?.groupValues?.get(1)
+            ?: Regex("\\bjvmTarget\\b\\s*=\\s*[\"']?\\$\\{?([A-Za-z_][\\w.]*)}?[\"']?").find(s)?.groupValues?.get(1)?.let { vars[it] }
+        val jv = Regex("\\b(?:target|source)Compatibility\\b\\s*(?:=|\\.set\\(|\\()?\\s*[\"']?\\s*$VER").findAll(s)
+            .mapNotNull { normJvm(it.groupValues[1]) }.maxWithOrNull(compareBy { jvmMajor(it) })
+        return (normJvm(kt) ?: normJvm(toolchain)) to (jv ?: normJvm(toolchain))
+    }
+
     fun parse(raw: String, catalog: VersionCatalog? = null, extra: String? = null): GradleInfo {
         val s = strip(raw)
         val vars = variables(raw, extra ?: "")
@@ -146,10 +175,11 @@ object Gradle {
         Regex("manifestPlaceholders[^\\n]*").find(s)?.value?.let { line ->
             Regex("[\"'](\\w+)[\"']\\s*(?:to|:)\\s*[\"']([^\"']*)[\"']").findAll(line).forEach { ph[it.groupValues[1]] = it.groupValues[2] }
         }
+        val (kt, jv) = jvmTargets(s, vars)
         return GradleInfo(
             str(s, "namespace"), str(s, "applicationId"), num(s, "versionCode"), str(s, "versionName"),
             num(s, "minSdk(?:Version)?"), num(s, "targetSdk(?:Version)?"), num(s, "compileSdk(?:Version)?"),
-            deps, kotlin, ph, boms, only, proc,
+            deps, kotlin, ph, boms, only, proc, kt, jv,
         )
     }
 

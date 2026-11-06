@@ -111,18 +111,49 @@ object ApkSigner {
 
     // ---------- ключ ----------
 
+    /** Ключ из папки или null, если его там нет либо файлы повреждены. Ничего не создаёт и не перезаписывает. */
+    fun load(dir: File): Identity? {
+        val kf = File(dir, "debug.p8"); val cf = File(dir, "debug.crt")
+        if (!kf.isFile || !cf.isFile) return null
+        return try {
+            val id = Identity(KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(kf.readBytes())), cf.readBytes())
+            id.cert // сертификат тоже должен читаться
+            id
+        } catch (_: Exception) { null }
+    }
+
     fun loadOrCreate(dir: File): Identity {
         dir.mkdirs()
         val kf = File(dir, "debug.p8"); val cf = File(dir, "debug.crt")
-        if (kf.exists() && cf.exists()) {
-            try {
-                val key = KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(kf.readBytes()))
-                return Identity(key, cf.readBytes())
-            } catch (_: Exception) { /* битый файл — создадим заново */ }
-        }
-        val id = create()
+        load(dir)?.let { return it }
+        // битые файлы не затираем молча: оставляем копию рядом
+        if (kf.exists() || cf.exists()) runCatching { kf.copyTo(File(dir, "debug.p8.broken"), true); cf.copyTo(File(dir, "debug.crt.broken"), true) }
+        val id = try {
+            Identity(KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(DefaultKey.key)), DefaultKey.cert)
+        } catch (_: Exception) { create() }
         kf.writeBytes(id.key.encoded); cf.writeBytes(id.certDer)
         return id
+    }
+
+    /** Ставит постоянный ключ по умолчанию (как в debug.keystore репозитория). Возвращает SHA-256 сертификата. */
+    fun useDefault(dir: File): String {
+        dir.mkdirs()
+        KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(DefaultKey.key))
+        File(dir, "debug.p8").writeBytes(DefaultKey.key); File(dir, "debug.crt").writeBytes(DefaultKey.cert)
+        return sha256(DefaultKey.cert).joinToString("") { "%02x".format(it) }
+    }
+
+    /** Создаёт НОВЫЙ случайный ключ (RSA-2048) и кладёт его в папку. Возвращает отпечаток SHA-256. */
+    fun generate(dir: File): String {
+        dir.mkdirs()
+        val id = create()
+        File(dir, "debug.p8").writeBytes(id.key.encoded); File(dir, "debug.crt").writeBytes(id.certDer)
+        return id.fingerprint
+    }
+
+    /** Кладёт в zip ключ из памяти (в том же формате, что «Экспорт ключа»). */
+    fun exportIdentity(id: Identity, out: File) {
+        ZipOut(out).use { z -> z.add("debug.p8", id.key.encoded, false); z.add("debug.crt", id.certDer, false) }
     }
 
     /** Короткий отпечаток сертификата для показа в настройках; null, если ключа ещё нет. */
@@ -143,18 +174,39 @@ object ApkSigner {
                 key = rd("debug.p8"); cert = rd("debug.crt")
             }
         } else {
-            val ks = try { java.security.KeyStore.getInstance("PKCS12").also { k -> src.inputStream().use { k.load(it, password.toCharArray()) } } }
-                catch (e: Exception) { error("не удалось открыть хранилище (нужен PKCS12 и верный пароль): ${e.message}") }
-            val al = alias?.takeIf { it.isNotBlank() && ks.containsAlias(it) } ?: ks.aliases().toList().firstOrNull { ks.isKeyEntry(it) } ?: error("в хранилище нет ключа")
-            val pk = ks.getKey(al, password.toCharArray()) as? java.security.PrivateKey ?: error("не удалось достать ключ «$al» (неверный пароль?)")
-            if (pk.algorithm != "RSA") error("ключ ${pk.algorithm}: поддерживается только RSA")
-            key = pk.encoded; cert = ks.getCertificate(al).encoded
+            val (k, c) = readStore(src, password, alias, null)
+            key = k; cert = c
         }
         // проверяем, что ключ и сертификат читаются, и только потом заменяем
         KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(key))
         CertificateFactory.getInstance("X.509").generateCertificate(cert.inputStream())
         File(dir, "debug.p8").writeBytes(key); File(dir, "debug.crt").writeBytes(cert)
         return sha256(cert).joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Достаёт ключ и сертификат из хранилища: PKCS12 (.p12/.pfx), а также BKS и JKS, если они есть на устройстве.
+     * [keyPassword] — пароль самого ключа (если он отличается от пароля хранилища).
+     */
+    fun readStore(src: File, password: String, alias: String?, keyPassword: String?): Pair<ByteArray, ByteArray> {
+        var failure: Exception? = null
+        for (type in listOf("PKCS12", "JKS", "BKS")) {
+            try {
+                val ks = java.security.KeyStore.getInstance(type).also { k -> src.inputStream().use { k.load(it, password.toCharArray()) } }
+                val al = alias?.takeIf { it.isNotBlank() && ks.containsAlias(it) } ?: ks.aliases().toList().firstOrNull { ks.isKeyEntry(it) } ?: error("в хранилище нет ключа")
+                val pk = (ks.getKey(al, (keyPassword?.takeIf { it.isNotEmpty() } ?: password).toCharArray())
+                    ?: ks.getKey(al, password.toCharArray())) as? java.security.PrivateKey ?: error("не удалось достать ключ «$al» (неверный пароль?)")
+                if (pk.algorithm != "RSA") error("ключ ${pk.algorithm}: поддерживается только RSA")
+                return pk.encoded to ks.getCertificate(al).encoded
+            } catch (e: java.security.KeyStoreException) {
+                if (failure == null) failure = e // такого типа хранилищ на устройстве нет
+            } catch (e: IllegalStateException) {
+                throw e // понятное сообщение выше
+            } catch (e: Exception) {
+                if (failure == null || failure is java.security.KeyStoreException) failure = e
+            }
+        }
+        error("не удалось открыть хранилище (нужен PKCS12 и верный пароль): ${failure?.message ?: "неизвестный формат"}")
     }
 
     /** Кладёт ключ в zip (для переноса и резервной копии). Хранить как пароль: с ним можно подписывать от вашего имени. */

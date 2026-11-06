@@ -122,7 +122,12 @@ class App : Application() {
 
             override fun onFinish(result: Result?, error: String?, cancelled: Boolean) {
                 ui?.onFinish(result, error, cancelled)
-                if (!visible && !cancelled && Prefs.finishedNote(this@App)) Notif.finished(this@App, error == null, (error?.lineSequence()?.first() ?: result?.let { "${it.apk.name} · ${com.builder.core.Downloader.human(it.size)}" } ?: "Готово") + if (engine.fixes.isNotEmpty()) " · можно докачать" else "")
+                if (!visible && Prefs.finishedNote(this@App)) {
+                    val bad = error != null
+                    val ch = if (cancelled) Notif.CH_CANCEL else if (bad && engine.fixes.isNotEmpty()) Notif.CH_ASK else if (bad) Notif.CH_ERR else Notif.CH_OK
+                    val text = if (cancelled) "Сборка отменена" else (error?.lineSequence()?.first() ?: result?.let { "${it.apk.name} · ${com.builder.core.Downloader.human(it.size)}" } ?: "Готово") + if (engine.fixes.isNotEmpty()) " · можно докачать" else ""
+                    Notif.finished(this@App, !bad && !cancelled, text, ch, if (cancelled) "APK TBuilder · отменено" else if (ch == Notif.CH_ASK) "APK TBuilder · нужна докачка" else null)
+                }
             }
 
             override fun onProject() { ui?.onProject() }
@@ -148,7 +153,10 @@ class App : Application() {
 
 object Notif {
     private const val CH_RUN = "build_run"
-    private const val CH_DONE = "build_done"
+    const val CH_OK = "done_ok"
+    const val CH_ERR = "done_error"
+    const val CH_CANCEL = "done_cancel"
+    const val CH_ASK = "done_ask"
     const val ID_RUN = 41
     const val ID_DONE = 42
 
@@ -156,23 +164,38 @@ object Notif {
         if (Build.VERSION.SDK_INT < 26) return
         val nm = ctx.getSystemService(NotificationManager::class.java)
         if (nm.getNotificationChannel(CH_RUN) == null) nm.createNotificationChannel(NotificationChannel(CH_RUN, com.builder.core.L.tr("Ход сборки"), NotificationManager.IMPORTANCE_LOW))
-        if (nm.getNotificationChannel(CH_DONE) == null) nm.createNotificationChannel(NotificationChannel(CH_DONE, com.builder.core.L.tr("Результат сборки"), NotificationManager.IMPORTANCE_DEFAULT))
+        fun mk(id: String, name: String) {
+            if (nm.getNotificationChannel(id) != null) return
+            val ch = NotificationChannel(id, com.builder.core.L.tr(name), NotificationManager.IMPORTANCE_DEFAULT)
+            ch.setSound(soundUri(ctx, id), android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION).setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            ch.enableVibration(false)
+            nm.createNotificationChannel(ch)
+        }
+        mk(CH_OK, "Сборка готова"); mk(CH_ERR, "Ошибка сборки"); mk(CH_CANCEL, "Сборка отменена"); mk(CH_ASK, "Нужна докачка")
+    }
+
+    /** Звук канала: свои файлы из res/raw, а не стандартный сигнал системы. */
+    private fun soundUri(ctx: Context, ch: String): android.net.Uri {
+        val res = when (ch) { CH_OK -> R.raw.build_ok; CH_ERR -> R.raw.build_error; CH_CANCEL -> R.raw.build_cancel; else -> R.raw.assistant_ask }
+        return android.net.Uri.parse("android.resource://" + ctx.packageName + "/" + res)
     }
 
     @Suppress("DEPRECATION")
-    fun build(ctx: Context, text: String, ongoing: Boolean, ok: Boolean = true, title: String? = null, progress: Int = -1): Notification {
+    fun build(ctx: Context, text: String, ongoing: Boolean, ok: Boolean = true, title: String? = null, progress: Int = -1, channel: String? = null): Notification {
         ensure(ctx)
         val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             if (Build.VERSION.SDK_INT >= 23) PendingIntent.FLAG_IMMUTABLE else 0)
-        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, if (ongoing) CH_RUN else CH_DONE) else Notification.Builder(ctx)
+        val chId = if (ongoing) CH_RUN else (channel ?: if (ok) CH_OK else CH_ERR)
+        val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, chId) else Notification.Builder(ctx).also { if (!ongoing) it.setSound(soundUri(ctx, chId)) }
         return b.setSmallIcon(if (ongoing) android.R.drawable.stat_sys_download else if (ok) android.R.drawable.stat_sys_download_done else android.R.drawable.stat_notify_error)
             .setContentTitle(com.builder.core.L.tr(title ?: if (ongoing) "APK TBuilder · сборка" else if (ok) "APK TBuilder · готово" else "APK TBuilder · ошибка"))
-            .setContentText(com.builder.core.L.tr(text)).setContentIntent(open).setOngoing(ongoing).setOnlyAlertOnce(true).setAutoCancel(!ongoing)
+            .setContentText(com.builder.core.L.tr(text)).setContentIntent(open).setOngoing(ongoing).setOnlyAlertOnce(ongoing).setAutoCancel(!ongoing)
             .apply { if (ongoing) setProgress(100, progress.coerceAtLeast(0), progress < 0) }.build()
     }
 
-    fun finished(ctx: Context, ok: Boolean, text: String) {
-        try { ctx.getSystemService(NotificationManager::class.java).notify(ID_DONE, build(ctx, text, false, ok)) } catch (_: Exception) {}
+    fun finished(ctx: Context, ok: Boolean, text: String, channel: String? = null, title: String? = null) {
+        try { ctx.getSystemService(NotificationManager::class.java).notify(ID_DONE, build(ctx, text, false, ok, title, -1, channel)) } catch (_: Exception) {}
     }
 }
 

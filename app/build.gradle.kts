@@ -6,14 +6,14 @@ android {
     namespace = "com.builder"
     compileSdk = 34
     defaultConfig {
-        applicationId = "com.builder.apkbuilder"
+        applicationId = "com.tbuilder.sounds"
         minSdk = 24
         // 28: Android разрешает запускать скачанные бинарники (aapt2 и др.) из папки приложения.
         // Для targetSdk >= 29 это запрещено системой — не повышайте без отдельного решения.
         targetSdk = 28
         // На CI номер растёт с каждым запуском, поэтому свежая сборка ставится поверх старой.
-        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 3
-        versionName = "2.1"
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 5
+        versionName = "2.2"
     }
     signingConfigs {
         // Постоянный debug-ключ в репозитории: все сборки подписаны одинаково,

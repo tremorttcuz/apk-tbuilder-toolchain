@@ -171,7 +171,7 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
 
     fun useProject(name: String): Boolean {
         if (running || name !in projects()) return false
-        project = name
+        project = name; curAppId = ""
         File(home, "project.txt").writeText(name)
         stages.filter { it.group == Group.BUILD }.forEach { it.reset() }
         result = null; lastError = null
@@ -546,6 +546,7 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
             if (guessed != null) s.tip = "package выбран автоматически ($ns); чтобы задать свой, добавь его в <manifest>"
         }
         val appId = gi?.applicationId ?: ns
+        curAppId = appId
         var autoCode = -1
         if (autoVersion()) {
             // секунды с 2023-11-14: помещается в Int и всегда больше предыдущей сборки
@@ -580,6 +581,9 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
         File(buildDir, "link.flags").writeText(flags.joinToString(" "))
         s.note = (if (appId != ns) "$ns → $appId" else ns) + (if (autoCode > 0) " · версия $autoCode" else "") + if (replaced > 0) " · подстановок: $replaced" else ""
     }
+
+    /** applicationId собираемого приложения: по нему подбирается ключ подписи. */
+    @Volatile private var curAppId = ""
 
     private val codeExt = setOf("kt", "java")
 
@@ -618,6 +622,7 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
             dexFiles().isNotEmpty() -> "готовый dex + ресурсы"
             else -> "только ресурсы"
         }
+        if (Godot.isProject(projectDir)) console.add(c("90", "  Godot-проект: движок из Maven, файлы игры идут в assets/"))
         console.add(c("90", "  тип: $kind" + (gi?.let { " · Gradle, namespace ${it.namespace ?: "—"}" } ?: "")))
         if (kt && tools["kotlinc"] == null) throw BuildError("в проекте есть Kotlin, а компилятор не установлен", TIP_TOOLS)
         if (jv && tools["ecjdex"] == null) throw BuildError("в проекте есть Java, а компилятор не установлен", TIP_TOOLS)
@@ -703,7 +708,7 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
         s.note = "${all.size} библиотек · ${Downloader.human(all.sumOf { it.file?.length() ?: 0L })}"
     }
 
-    private fun mavenRepos(): List<String> = if (debugOffline) listOf("http://127.0.0.1:9/offline") else listOf("https://dl.google.com/dl/android/maven2", "https://repo1.maven.org/maven2")
+    private fun mavenRepos(): List<String>? = if (debugOffline) listOf("http://127.0.0.1:9/offline") else null
 
     private fun doDeps(s: Stage, i: Int) {
         probeVm()
@@ -778,10 +783,12 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
         val src = File(projectDir, "src"); val gen = File(buildDir, "gen")
         val out = File(buildDir, "kclasses").also { it.mkdirs() }
         val plugin = tools["composec"]
+        val jt = Jvm.targets(gradleInfo())
+        console.add(c("90", "  " + jt.note))
         val cp = listOf(aj) + compileJars()
         val args = ArrayList<String>()
         args += listOf("-kotlin-home", File(root, "jvm/home").also { it.mkdirs() }.path, "-no-jdk", "-no-stdlib", "-no-reflect", "-nowarn",
-            "-jvm-target", "1.8", "-Xskip-metadata-version-check", "-Xskip-prerelease-check", "-module-name", project.replace(Regex("[^A-Za-z0-9_]"), "_"),
+            "-jvm-target", jt.kotlin, "-Xskip-metadata-version-check", "-Xskip-prerelease-check", "-module-name", project.replace(Regex("[^A-Za-z0-9_]"), "_"),
             "-cp", cp.joinToString(":") { it.path }, "-d", out.path)
         if (compose && plugin != null) args += "-Xplugin=${plugin.path}"
         else if (compose) console.add(c("33", "  ⚠ нет плагина Compose — @Composable не скомпилируются"))
@@ -805,9 +812,10 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
         val out = File(buildDir, "classes").also { it.mkdirs() }
         val aj = androidJarOrFail()
         val cp = compileJars() + listOfNotNull(File(buildDir, "kclasses").takeIf { it.isDirectory })
+        val jt = Jvm.targets(gradleInfo())
         val argFile = File(buildDir, "ecj.args")
         // -bootclasspath обязателен: без него ecj ищет классы JDK (javax.lang.model…), которых в Android нет
-        argFile.writeText((listOf("-proc:none", "-source", "1.8", "-target", "1.8", "-nowarn", "-encoding", "UTF-8", "-bootclasspath", aj.path,
+        argFile.writeText((listOf("-proc:none", "-source", jt.java, "-target", jt.java, "-nowarn", "-encoding", "UTF-8", "-bootclasspath", aj.path,
             "-cp", cp.joinToString(":") { it.path }, "-d", out.path) + files.map { it.path }).joinToString("\n"))
         s.detail = "${files.size} файлов"; notifyStage(i, true)
         runChecked(Jvm.appProcess(heap(1024), listOf(ecj), "org.eclipse.jdt.internal.compiler.batch.Main", listOf("@" + argFile.path), jvmProps()), s, i,
@@ -839,11 +847,16 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
         s.note = "${dex.size} dex · ${Downloader.human(dex.sumOf { it.length() })}"
     }
 
+    /** Какие архитектуры класть в APK (tbuilder.json → "abis"); null — все, что есть. */
+    private fun abiFilter(): Set<String>? =
+        try { (Json.parse(File(projectDir, "tbuilder.json").readText()) as? JObj)?.strList("abis")?.toSet()?.takeIf { it.isNotEmpty() } } catch (_: Exception) { null }
+
     /** Нативные библиотеки: файлы .so из jniLibs/<abi> проекта и jni/ из AAR → lib/<abi>/ в APK (без сжатия, по границе страницы). */
     private fun addNative(z: ZipOut): Int {
         var n = 0
+        val only = abiFilter()
         fun put(abiDir: File) {
-            for (abi in abiDir.listFiles { f -> f.isDirectory }.orEmpty().sortedBy { it.name }) for (so in abi.listFiles { f -> f.isFile && f.extension == "so" }.orEmpty().sortedBy { it.name }) {
+            for (abi in abiDir.listFiles { f -> f.isDirectory && (only == null || f.name in only) }.orEmpty().sortedBy { it.name }) for (so in abi.listFiles { f -> f.isFile && f.extension == "so" }.orEmpty().sortedBy { it.name }) {
                 val name = "lib/${abi.name}/${so.name}"
                 if (z.has(name)) continue
                 z.addStored(name, so.length(), ZipOut.crcOf(so), 4096) { so.inputStream() }; n++
@@ -888,17 +901,43 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
             if (so > 0) console.add(c("90", "  + нативные библиотеки: $so"))
             val res = Jvm.addJavaResources(z, libs.filter { !it.provided }.flatMap { it.classJars })
             if (res > 0) console.add(c("90", "  + ресурсы из библиотек: $res"))
+            if (Godot.isProject(projectDir)) addGodot(z, s, i)
             s.note = "${z.count} файлов"
         }
         console.add(c("90", "  unsigned.apk · ${Downloader.human(unsigned.length())} · dex: ${dex.size}"))
         if (dex.isEmpty()) console.add(c("33", "  в APK нет кода (classes.dex) — это пакет только с ресурсами"))
     }
 
+    /** Файлы проекта Godot → assets/ внутри APK (так их читает движок на Android: res:// = assets/). */
+    private fun addGodot(z: ZipOut, s: Stage, i: Int) {
+        val gd = File(projectDir, Godot.DIR)
+        if (libs.none { it.group == "org.godotengine" && it.artifact == "godot" })
+            throw BuildError("не подключён движок Godot (org.godotengine:godot)", "Импортируй проект Godot заново")
+        val ver = libs.first { it.group == "org.godotengine" && it.artifact == "godot" }.version
+        val files = Godot.assets(gd)
+        // уже сжатые форматы кладём без повторного сжатия
+        val packed = setOf("png", "jpg", "jpeg", "webp", "ogg", "mp3", "mp4", "webm", "ogv", "zip", "ctex", "oggstr", "mp3str", "sample", "scn", "glb", "ktx", "astc")
+        var bytes = 0L
+        for ((k, f) in files.withIndex()) {
+            if (cancel) throw Cancelled()
+            val name = "assets/" + f.relativeTo(gd).path.replace(File.separatorChar, '/')
+            if (z.has(name)) continue
+            if (f.length() > (4L shl 20) || f.extension.lowercase() in packed) z.addStored(name, f.length(), ZipOut.crcOf(f)) { f.inputStream() }
+            else z.add(name, f.readBytes(), false)
+            bytes += f.length()
+            if (k % 20 == 0) { s.detail = "игра · ${k + 1}/${files.size}"; s.progress = (k + 1f) / files.size; notifyStage(i) }
+        }
+        if (!Godot.importedOk(gd)) console.add(c("33", "  ⚠ нет .godot/imported — картинки и звуки не загрузятся; открой проект в редакторе Godot и добавь папку .godot в архив"))
+        console.add(c("90", "  + игра Godot: ${files.size} файлов · ${Downloader.human(bytes)} · движок $ver"))
+    }
+
     private fun doSign(s: Stage, i: Int) {
         val unsigned = File(buildDir, "unsigned.apk")
         if (!unsigned.isFile) throw BuildError("нет build/unsigned.apk")
-        val id = ApkSigner.loadOrCreate(File(home, "keys"))
-        console.add(c("90", "  ключ RSA-2048 · SHA-256 ${id.fingerprint.take(16)}…"))
+        val pick = keyPick(true)!!
+        val id = pick.id
+        console.add(c("90", "  ${pick.source} · RSA-2048 · SHA-256 ${id.fingerprint.take(16)}…"))
+        pick.warning?.let { w -> console.add(c("33", "  ⚠ $w")); s.tip = w }
         val v1 = File(buildDir, "signed-v1.apk")
         val n = ApkSigner.sign(unsigned, v1, id) { name -> s.detail = "подпись v1 · $name"; notifyStage(i) }
         s.detail = "подпись v2 · весь файл"; notifyStage(i, true)
@@ -914,6 +953,7 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
         val v2 = try { ApkSigner.verifyV2(signed) } catch (e: Exception) { throw BuildError("подпись v2 не прошла проверку: ${e.message}") }
         if (v2.fingerprint != v.fingerprint) throw BuildError("сертификаты v1 и v2 различаются")
         console.add(c("90", "  v1: ${v.files} файлов · v2: весь файл · сертификат ${v.fingerprint.take(16)}…"))
+        keyRing.remember(curAppId, v.fingerprint) // дальше сборки этого приложения подбирают тот же ключ
         s.note = "v1 + v2 · ${v.files} файлов"
     }
 
@@ -1197,15 +1237,19 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
 
             // манифест: ближайший к корню, build/ и скрытые папки не считаем
             var best: File? = null; var bestDepth = Int.MAX_VALUE
+            var godot: File? = null; var godotDepth = Int.MAX_VALUE
             fun walk(d: File, depth: Int) {
                 if (depth > 6) return
                 for (k in d.listFiles().orEmpty().sortedBy { it.name }) {
                     if (k.isDirectory) { if (k.name != "build" && !k.name.startsWith(".") && k.name != "__MACOSX") walk(k, depth + 1) }
                     else if (k.name == "AndroidManifest.xml" && depth < bestDepth) { best = k; bestDepth = depth }
+                    else if (k.name == "project.godot" && depth < godotDepth) { godot = k; godotDepth = depth }
                 }
             }
             walk(tmp, 0)
-            val manifest = best ?: throw BuildError("В архиве нет AndroidManifest.xml", "Нужен проект с AndroidManifest.xml и папкой res/")
+            // проект Godot: project.godot лежит ближе к корню, чем манифест (шаблон android/build внутри проекта Godot не считается)
+            godot?.let { if (godotDepth <= bestDepth) return importGodot(it.parentFile!!, n, log) }
+            val manifest = best ?: throw BuildError("В архиве нет AndroidManifest.xml", "Нужен проект с AndroidManifest.xml и папкой res/ — либо проект Godot 4 (project.godot)")
             val rootDir = manifest.parentFile!!
             if (rootDir != tmp) log("корень проекта: " + rootDir.relativeTo(tmp).path)
 
@@ -1249,6 +1293,41 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
         }
     }
 
+    /**
+     * Проект Godot 4 → проект TBuilder: исходники Godot уходят в godot/, рядом создаётся Android-обёртка
+     * (манифест, Activity, значок, зависимость от движка org.godotengine:godot).
+     */
+    private fun importGodot(gdDir: File, n: String, log: (String) -> Unit): String {
+        val info = Godot.parse(File(gdDir, "project.godot").readText(), File(gdDir, "export_presets.cfg").takeIf { it.isFile }?.readText(), pf.abis)
+        if (info.major < 4) throw BuildError("Проект Godot ${info.version ?: "3.x"}: на телефоне собираются только проекты Godot 4", "Открой проект в Godot 4.x, сохрани и импортируй заново")
+        if (info.mono) throw BuildError("Проект на C# (Godot Mono) на телефоне не собирается: нужен .NET", "Используй GDScript или собери проект на компьютере")
+        log("Godot ${info.version ?: "4"} · «${info.name}» · ${info.packageName}")
+        val dst = File(projectsDir, n)
+        if (dst.exists()) { dst.deleteRecursively(); log("проект $n заменён") }
+        dst.mkdirs()
+        val gd = File(dst, Godot.DIR)
+        if (!gdDir.renameTo(gd)) gdDir.copyRecursively(gd, true)
+
+        File(dst, "AndroidManifest.xml").writeText(Godot.manifest(info))
+        File(dst, "src/" + info.packageName.replace('.', '/')).also { it.mkdirs() }.let { File(it, "GodotApp.java").writeText(Godot.activity(info)) }
+        File(dst, "res/values").mkdirs(); File(dst, "res/values/strings.xml").writeText(Godot.strings(info))
+        val icon = info.iconPath?.removePrefix("res://")?.let { File(gd, it) }?.takeIf { it.isFile && it.extension.equals("png", true) }?.readBytes()
+            ?: pf.asset("sample/res/drawable/ic_launcher.png")
+        if (icon != null) { File(dst, "res/mipmap-xxxhdpi").mkdirs(); File(dst, "res/mipmap-xxxhdpi/ic_launcher.png").writeBytes(icon) }
+
+        val gi = GradleInfo(info.packageName, info.packageName, info.versionCode, info.versionName, if (info.minor >= 4) 24 else 21, 34, 35,
+            listOf(Godot.dependency(info)), false, emptyMap(), javaTarget = "1.8")
+        File(dst, ".gradle.json").writeText(gi.toJson())
+        // в APK кладём только архитектуры из пресета экспорта, а без пресета — архитектуру этого телефона (движок весит ~60 МБ на каждую)
+        val abis = info.abis.ifEmpty { listOf(pf.abis.firstOrNull() ?: "arm64-v8a") }
+        File(dst, "tbuilder.json").writeText(Json.stringify(mapOf("abis" to abis)))
+
+        val files = Godot.assets(gd).size
+        log("файлов игры: $files · архитектуры: ${abis.joinToString()} · движок: ${Godot.dependency(info)}")
+        if (!Godot.importedOk(gd)) log("⚠ нет папки .godot/imported: открой проект в редакторе Godot один раз и добавь .godot в архив — иначе картинки и звуки не загрузятся")
+        return n
+    }
+
     private fun recordHistory(ok: Boolean, ms: Long) {
         try {
             val r = result
@@ -1266,10 +1345,40 @@ class Engine(private val pf: Platform, var rhythm: Boolean = true, private val a
             ?.mapNotNull { runCatching { Json.parse(it) as? JObj }.getOrNull() }.orEmpty()
 
     val keysDir get() = File(home, "keys")
+    val keyRing get() = KeyRing(keysDir)
+
+    private fun gradleText(): String? = File(projectDir, ".build.gradle").takeIf { it.isFile }?.readText()
+
+    /** Какой appId у текущего проекта, пока сборка не запускалась: из Gradle, иначе из package манифеста. */
+    private fun appIdNow(): String? = curAppId.takeIf { it.isNotEmpty() } ?: run {
+        val gi = try { gradleInfo() } catch (_: Exception) { null }
+        gi?.applicationId ?: gi?.namespace ?: File(projectDir, "AndroidManifest.xml").takeIf { it.isFile }?.let { Jvm.packageOf(it.readText()) }
+    }
+
+    /** Выбор ключа для проекта: проектный → из build.gradle → прежний ключ приложения → общий. */
+    fun keyPick(create: Boolean): KeyPick? = keyRing.pick(project, appIdNow(), projectDir, gradleText(), create)
+
+    /** Коротко для настроек: чем будет подписан текущий проект. */
+    fun keyInfo(): String = keyRing.describe(project, appIdNow(), projectDir, gradleText())
+
     fun keyFingerprint(): String? = ApkSigner.fingerprint(keysDir)
-    fun importKey(src: File, password: String, alias: String?) = ApkSigner.importKey(keysDir, src, password, alias)
-    fun exportKey(): File = File(home, "work/apk-tbuilder-key.zip").also { it.parentFile?.mkdirs(); it.delete(); ApkSigner.exportKey(keysDir, it) }
+    fun hasProjectKey() = keyRing.hasProjectKey(project)
+
+    /** Импорт ключа: в общий (forProject = false) или только для текущего проекта. */
+    fun importKey(src: File, password: String, alias: String?, forProject: Boolean = false) =
+        ApkSigner.importKey(if (forProject) keyRing.projectDir(project) else keysDir, src, password, alias)
+
+    /** Экспорт ключа, которым подписывается текущий проект. */
+    fun exportKey(): File = File(home, "work/apk-tbuilder-key.zip").also {
+        it.parentFile?.mkdirs(); it.delete()
+        ApkSigner.exportIdentity(keyPick(true)!!.id, it)
+    }
+
+    /** Новый случайный общий ключ либо ключ только для текущего проекта. Возвращает отпечаток. */
+    fun newKey(forProject: Boolean): String = ApkSigner.generate(if (forProject) keyRing.projectDir(project) else keysDir)
+    fun dropProjectKey() { ApkSigner.resetKey(keyRing.projectDir(project)) }
     fun resetKey() = ApkSigner.resetKey(keysDir)
+    fun useDefaultKey() = ApkSigner.useDefault(keysDir)
 
     fun clearHistory() { if (!running) runCatching { File(home, "builds.jsonl").delete() } }
 

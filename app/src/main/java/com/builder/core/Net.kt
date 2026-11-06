@@ -55,6 +55,7 @@ class Downloader(private val cancelled: () -> Boolean) {
     private fun attemptOnce(url: String, part: File, onProgress: (Long, Long, Long) -> Unit) {
         var have = if (part.exists()) part.length() else 0L
         val c = URL(url).openConnection() as HttpURLConnection
+        var clean = false
         try {
             c.connectTimeout = 15000; c.readTimeout = 30000; c.instanceFollowRedirects = true
             c.setRequestProperty("User-Agent", "ApkBuilder/2.0")
@@ -87,8 +88,11 @@ class Downloader(private val cancelled: () -> Boolean) {
             }
             if (total > 0 && part.length() != total) throw IOException("загрузка оборвалась на ${part.length()} из $total байт")
             onProgress(part.length(), part.length(), speed)
+            clean = true
         } finally {
-            c.disconnect()
+            // disconnect() закрывает сокет; после полностью прочитанного ответа соединение лучше вернуть в пул:
+            // сотни мелких файлов (POM) тогда не платят за TLS-рукопожатие каждый раз
+            if (!clean) c.disconnect()
         }
     }
 
@@ -193,10 +197,23 @@ class Console {
     /** Журнал последней сборки дублируется в файл: его можно прочитать и отправить, даже если приложение закрыто. */
     @Volatile var file: File? = null
 
+    private var out: java.io.Writer? = null
+    private var outFile: File? = null
+
     fun add(s: String) {
         synchronized(this) {
             buf.add(s); if (buf.size > 4000) buf.subList(0, 1000).clear()
-            try { file?.appendText(Ansi.parse(s, 0).text + "\n") } catch (_: Exception) {}
+            // файл держим открытым: раньше он открывался и закрывался на каждую строку, а компиляторы выводят их тысячами
+            try {
+                val f = file
+                if (f != null) {
+                    if (out == null || outFile != f) {
+                        runCatching { out?.close() }
+                        out = java.io.BufferedWriter(java.io.OutputStreamWriter(java.io.FileOutputStream(f, true), Charsets.UTF_8)); outFile = f
+                    }
+                    out!!.write(Ansi.parse(s, 0).text + "\n"); out!!.flush()
+                }
+            } catch (_: Exception) { out = null }
         }
         listener?.invoke(s)
     }

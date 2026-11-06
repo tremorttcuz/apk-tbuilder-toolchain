@@ -3,6 +3,9 @@ package com.builder.core
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Optional
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import javax.xml.parsers.DocumentBuilderFactory
@@ -45,17 +48,30 @@ class Maven(
     private val cancelled: () -> Boolean,
     private val log: (String) -> Unit,
     private val progress: (Float, String) -> Unit,
-    private val repos: List<String> = listOf("https://dl.google.com/dl/android/maven2", "https://repo1.maven.org/maven2"),
+    /** Google Maven: androidx, Material, Firebase. */
+    private val google: String = "https://dl.google.com/dl/android/maven2",
+    /**
+     * Maven Central: сначала быстрое зеркало Google Cloud (без ограничений по частоте запросов), затем сам Central.
+     * Если репозиторий ответил ошибкой (429, 5xx, обрыв), берётся следующий — раньше сборка падала на первом сбое.
+     */
+    private val central: List<String> = listOf(MIRROR, "https://repo1.maven.org/maven2"),
+    /** Явный список репозиториев (для проверок без сети): перекрывает google/central. */
+    private val repos: List<String>? = null,
     /** Всегда спрашивать у репозитория свежие версии (для зависимостей без версии и BOM по умолчанию); без сети берётся кэш. */
     private val fresh: Boolean = false,
 ) {
-    private val poms = HashMap<String, Pom?>()
+    private val poms = ConcurrentHashMap<String, Optional<Pom>>()
+    private val pomLocks = ConcurrentHashMap<String, Any>()
     private val latestCache = HashMap<String, String>()
+    private val versionCache = HashMap<String, List<String>>()
     private var fetched = 0
 
     private fun key(g: String, a: String) = "$g:$a"
 
     companion object {
+        const val MIRROR = "https://maven-central.storage-download.googleapis.com/maven2"
+        /** Параллельных загрузок и разборов POM. */
+        const val THREADS = 8
         const val OFFLINE_TIP = "Библиотеки скачиваются один раз. Подключись к интернету и нажми «Повторить» — или поставь компонент «Библиотеки» в настройках, дальше сборка работает без сети"
     }
     private fun dirOf(g: String, a: String, v: String) = File(cache, "${g.replace('.', '/')}/$a/$v")
@@ -66,22 +82,28 @@ class Maven(
         if (dest.isFile && dest.length() > 0) return true
         val miss = File(dest.path + ".404")
         if (miss.exists()) return false
-        // сначала репозиторий, где такая группа обычно живёт
-        val order = if (rel.startsWith("androidx/") || rel.startsWith("com/android/") || rel.startsWith("com/google/android/") || rel.startsWith("com/google/ar/")) repos else repos.reversed()
+        // сначала репозиторий, где такая группа обычно живёт; список версий (metadata) — только из первоисточников: зеркало отстаёт
+        val googleFirst = rel.startsWith("androidx/") || rel.startsWith("com/android/") || rel.startsWith("com/google/android/") || rel.startsWith("com/google/ar/")
+        var order = repos ?: if (googleFirst) listOf(google) + central else central + google
+        if (rel.endsWith("maven-metadata.xml")) order = order.filter { it != MIRROR }
         var notFound = 0
+        var http: HttpError? = null
+        var io: java.io.IOException? = null
         for (r in order) {
             if (cancelled()) throw Cancelled()
             try {
-                Downloader { cancelled() }.fetch("$r/$rel", dest, null, attempts = 3) { _, _, _ -> }
+                Downloader { cancelled() }.fetch("$r/$rel", dest, null, attempts = 2) { _, _, _ -> }
                 return true
             } catch (e: HttpError) {
-                if (e.code == 404) notFound++ else throw BuildError("не удалось скачать $rel: ${e.message}", OFFLINE_TIP)
+                // у зеркала на отсутствующий файл бывает и 403
+                if (e.code == 404 || (r == MIRROR && e.code == 403)) notFound++ else http = e
             } catch (e: java.io.IOException) {
-                throw BuildError("нет доступа к сети: ${e.message ?: e.javaClass.simpleName}\n$rel", OFFLINE_TIP)
+                io = e
             }
         }
-        if (notFound == order.size) { miss.parentFile?.mkdirs(); miss.createNewFile() }
-        return false
+        if (notFound == order.size) { miss.parentFile?.mkdirs(); miss.createNewFile(); return false }
+        http?.let { throw BuildError("не удалось скачать $rel: ${it.message}", OFFLINE_TIP) }
+        throw BuildError("нет доступа к сети: ${io?.message ?: io?.javaClass?.simpleName ?: "ошибка"}\n$rel", OFFLINE_TIP)
     }
 
     private fun text(rel: String, dest: File): String? = if (download(rel, dest)) dest.readText() else null
@@ -124,34 +146,55 @@ class Maven(
         return t.removeSuffix(".+").removeSuffix("+")
     }
 
-    private fun latest(g: String, a: String): String {
-        return latestCache.getOrPut(key(g, a)) {
+    /** Все версии из maven-metadata.xml (кэш обновляется раз в неделю; без сети берётся устаревший). */
+    private fun versionsOf(g: String, a: String): List<String> {
+        return versionCache.getOrPut(key(g, a)) {
             val rel = "${g.replace('.', '/')}/$a/maven-metadata.xml"
             val f = File(cache, rel)
             // список версий обновляем раз в неделю; без сети берём устаревший — сборка не должна ломаться офлайн
             val old = if (f.isFile) f.readText() else null
             if (old != null && (fresh || System.currentTimeMillis() - f.lastModified() > 7 * 86400_000L)) {
                 f.delete()
-                val fresh = try { text(rel, f) } catch (e: BuildError) { null }
-                if (fresh == null) { f.writeText(old) }
+                val newer = try { text(rel, f) } catch (e: BuildError) { null }
+                if (newer == null) { f.writeText(old) }
             }
             val xml = text(rel, f) ?: throw BuildError("нет такой библиотеки: $g:$a", "Укажи версию явно: $g:$a:<версия>")
-            val vers = Regex("<version>([^<]+)</version>").findAll(xml).map { it.groupValues[1] }.toList()
-            val stable = vers.filter { rank(segs(it).filterIsInstance<String>().firstOrNull() ?: "final") >= 4 }.ifEmpty { vers }
-            stable.maxWithOrNull { x, y -> compare(x, y) } ?: throw BuildError("у $g:$a нет версий")
+            Regex("<version>([^<]+)</version>").findAll(xml).map { it.groupValues[1] }.toList()
         }
+    }
+
+    private fun stableMax(vers: List<String>): String? {
+        val stable = vers.filter { rank(segs(it).filterIsInstance<String>().firstOrNull() ?: "final") >= 4 }.ifEmpty { vers }
+        return stable.maxWithOrNull { x, y -> compare(x, y) }
+    }
+
+    private fun latest(g: String, a: String): String =
+        latestCache.getOrPut(key(g, a)) { stableMax(versionsOf(g, a)) ?: throw BuildError("у $g:$a нет версий") }
+
+    /** Динамическая версия Gradle: «4.3.+», «1.+», «+» — самая новая стабильная из подходящих. */
+    private fun isDynamic(spec: String) = spec.trim().endsWith("+") && !spec.trim().startsWith("[") && !spec.trim().startsWith("(")
+
+    private fun concrete(g: String, a: String, spec: String): String {
+        if (!isDynamic(spec)) return pick(spec)
+        val prefix = spec.trim().removeSuffix("+")
+        val ok = versionsOf(g, a).filter { it.startsWith(prefix) }
+        return stableMax(ok) ?: throw BuildError("у $g:$a нет версии «$spec»", "Версии: " + versionsOf(g, a).takeLast(6).joinToString(", "))
     }
 
     // ------------------------------------------------------------------ POM
 
     private fun parsePom(g: String, a: String, v: String): Pom? {
         val k = "$g:$a:$v"
-        if (poms.containsKey(k)) return poms[k]
-        val rel = "${g.replace('.', '/')}/$a/$v/$a-$v.pom"
-        val xml = text(rel, File(dirOf(g, a, v), "$a-$v.pom"))
-        val pom = if (xml == null) null else try { readPom(xml, g, a, v) } catch (e: BuildError) { throw e } catch (e: Exception) { log("  ⚠ POM $k: ${e.message}"); null }
-        poms[k] = pom
-        return pom
+        poms[k]?.let { return it.orElse(null) }
+        // один и тот же POM не качаем двумя потоками сразу: иначе они пишут в один и тот же .part
+        synchronized(pomLocks.computeIfAbsent(k) { Any() }) {
+            poms[k]?.let { return it.orElse(null) }
+            val rel = "${g.replace('.', '/')}/$a/$v/$a-$v.pom"
+            val xml = text(rel, File(dirOf(g, a, v), "$a-$v.pom"))
+            val pom = if (xml == null) null else try { readPom(xml, g, a, v) } catch (e: BuildError) { throw e } catch (e: Exception) { log("  ⚠ POM $k: ${e.message}"); null }
+            poms[k] = Optional.ofNullable(pom)
+            return pom
+        }
     }
 
     private fun child(e: Element, name: String): Element? { var n = e.firstChild; while (n != null) { if (n is Element && n.tagName == name) return n; n = n.nextSibling }; return null }
@@ -200,7 +243,7 @@ class Maven(
         return Pom(g, a, v, txt(root, "packaging") ?: "jar", deps, managed)
     }
 
-    private val parentProps = HashMap<String, HashMap<String, String>>()
+    private val parentProps = ConcurrentHashMap<String, Map<String, String>>()
 
     // ------------------------------------------------------------------ разрешение
 
@@ -229,12 +272,13 @@ class Maven(
             log("  версии без BOM — использую $bomCoord")
             pom.managed.forEach { (k, vv) -> managed.putIfAbsent(k, vv) }
         }
+        warmUp(direct + provided, managed)
         val versions = LinkedHashMap<String, String>()
         val rootProvided = provided.map { key(it.g, it.a) }.toSet()
         val order = LinkedHashMap<String, Pair<String, Boolean>>() // ga → (версия, aar?)
 
         fun want(g: String, a: String, v: String?): String =
-            v?.let(::pick) ?: managed[key(g, a)]?.let(::pick) ?: versions[key(g, a)] ?: latest(g, a)
+            v?.let { concrete(g, a, it) } ?: managed[key(g, a)]?.let(::pick) ?: versions[key(g, a)] ?: latest(g, a)
 
         var pass = 0
         while (true) {
@@ -269,7 +313,7 @@ class Maven(
         // скачивание и распаковка
         val libs = ArrayList<Lib>()
         val items = order.entries.toList()
-        val pool = Executors.newFixedThreadPool(4) { r -> Thread(r, "maven").apply { isDaemon = true } }
+        val pool = Executors.newFixedThreadPool(THREADS) { r -> Thread(r, "maven").apply { isDaemon = true } }
         try {
             val futures = ArrayList<Future<Lib?>>()
             var done = 0
@@ -287,6 +331,44 @@ class Maven(
         } finally { pool.shutdownNow() }
         log("  библиотек: ${libs.size} (aar ${libs.count { it.aar }}, jar ${libs.count { !it.aar }})")
         return libs
+    }
+
+    /**
+     * Заранее, параллельно, скачивает и разбирает POM всего дерева зависимостей (по уровням в ширину). Дальше разрешение версий
+     * идёт по готовому кэшу, а не качает сотню мелких файлов по одному. Версии берутся так же, как при разрешении;
+     * если потом версия поменяется из-за конфликта, нужный POM докачается как обычно. Ошибки здесь не важны — их повторит основной проход.
+     */
+    private fun warmUp(roots: List<Coord>, managed: Map<String, String>) {
+        class Node(val g: String, val a: String, val v: String)
+        val seen = ConcurrentHashMap.newKeySet<String>()
+        var level = roots.mapNotNull { c ->
+            val v = c.v?.takeUnless { isDynamic(it) }?.let(::pick) ?: managed[key(c.g, c.a)]?.let(::pick) ?: return@mapNotNull null
+            Node(c.g, c.a, v)
+        }.filter { seen.add("${it.g}:${it.a}:${it.v}") }
+        if (level.isEmpty()) return
+        val pool = Executors.newFixedThreadPool(THREADS) { r -> Thread(r, "maven-pom").apply { isDaemon = true } }
+        try {
+            var depth = 0
+            while (level.isNotEmpty() && depth++ < 16 && seen.size < 4000) {
+                if (cancelled()) throw Cancelled()
+                progress(0f, "описания библиотек · ${seen.size}")
+                val next = pool.invokeAll(level.map { n ->
+                    Callable<List<Node>> {
+                        try {
+                            val pom = if (cancelled()) null else parsePom(n.g, n.a, n.v)
+                            pom?.deps.orEmpty().filter { d ->
+                                d.scope != "test" && d.scope != "provided" && d.scope != "system" && !d.optional && (d.type == "jar" || d.type == "aar" || d.type == "pom")
+                            }.mapNotNull { d ->
+                                val v = (d.v ?: pom!!.managed[key(d.g, d.a)] ?: managed[key(d.g, d.a)])?.takeUnless { isDynamic(it) }?.let(::pick) ?: return@mapNotNull null
+                                Node(d.g, d.a, v)
+                            }
+                        } catch (_: Exception) { emptyList() }
+                    }
+                }).flatMap { f -> try { f.get() } catch (_: Exception) { emptyList() } }
+                level = next.filter { seen.add("${it.g}:${it.a}:${it.v}") }
+            }
+        } finally { pool.shutdownNow() }
+        if (cancelled()) throw Cancelled()
     }
 
     private fun fetchLib(g: String, a: String, v: String): Lib? {

@@ -20,6 +20,35 @@ object Jvm {
     /** Версии библиотек без BOM: если в build.gradle платформа не прочиталась, берём проверенный набор. */
     val DEFAULT_BOMS = mapOf("androidx.compose" to "androidx.compose:compose-bom:2024.12.01")
 
+    /** Выше этого уровня встроенные Kotlin 2.1 / ecj 3.37 / d8 класс-файлы не принимают. */
+    const val MAX_JVM = 21
+
+    /** Итоговые уровни для компиляторов: Kotlin `-jvm-target`, ecj `-source/-target` и пояснение для лога. */
+    class Targets(val kotlin: String, val java: String, val note: String)
+
+    /**
+     * JVM-таргет берётся из проекта (jvmTarget / jvmToolchain / sourceCompatibility…), а не зашит: проект на Java 17 собирается как 17,
+     * на 11 — как 11. Если в проекте ничего не задано, действует 1.8, как у Android Gradle Plugin по умолчанию.
+     * Значения выше MAX_JVM и ниже 8 приводятся к допустимым — с пояснением.
+     */
+    fun targets(gi: GradleInfo?): Targets {
+        val ktReq = gi?.jvmTarget ?: gi?.javaTarget
+        val jvReq = gi?.javaTarget ?: gi?.jvmTarget
+        val notes = ArrayList<String>()
+        fun fit(req: String?, what: String): String {
+            if (req == null) return "1.8"
+            val n = Gradle.jvmMajor(req)
+            return when {
+                n <= 8 -> { if (n < 8) notes.add("$what $req → 1.8 (ниже не поддерживается)"); "1.8" }
+                n > MAX_JVM -> { notes.add("$what $req → $MAX_JVM (максимум встроенных компиляторов)"); MAX_JVM.toString() }
+                else -> n.toString()
+            }
+        }
+        val k = fit(ktReq, "Kotlin"); val j = fit(jvReq, "Java")
+        val src = if (ktReq != null || jvReq != null) "из build.gradle" else "по умолчанию"
+        return Targets(k, j, "JVM-таргет: Kotlin $k · Java $j ($src)" + if (notes.isNotEmpty()) "; " + notes.joinToString("; ") else "")
+    }
+
     fun q(s: String) = "'" + s.replace("'", "'\\''") + "'"
 
     /** Размер кучи для компилятора: треть памяти устройства, но в пределах [512, cap] МБ. */

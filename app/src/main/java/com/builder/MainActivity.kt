@@ -41,6 +41,7 @@ class MainActivity : Activity(), EngineListener, TermActions {
     private val app get() = application as App
     private val engine get() = app.engine
     private val ui = Handler(Looper.getMainLooper())
+    private val sfx by lazy { SoundFx(this) }
 
     private lateinit var scroll: ScrollView
     private lateinit var chain: ChainView
@@ -359,7 +360,7 @@ class MainActivity : Activity(), EngineListener, TermActions {
             clearHistory = { engine.clearHistory(); history.onShown() },
             resetToolchain = { engine.resetToolchain(); refreshProject(); updateControls() },
             busy = { engine.running || engine.fixing },
-            keyInfo = { engine.keyFingerprint()?.let { "SHA-256 " + it.take(16) + "…" } ?: "создастся при первой сборке" },
+            keyInfo = { engine.keyInfo() },
             keyMenu = { keyMenu() },
             version = "v" + (try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "" }),
         ))
@@ -373,23 +374,59 @@ class MainActivity : Activity(), EngineListener, TermActions {
 
     // ------------------------------------------------------------------ ключ подписи
 
+    /** Куда пойдёт импортируемый ключ: в общий или только в текущий проект. */
+    private var keyForProject = false
+
+    private fun pickKeyFile(forProject: Boolean) {
+        keyForProject = forProject
+        try {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), REQ_KEY)
+        } catch (e: Exception) { Toast.makeText(this, L.tr("Нет приложения для выбора файлов"), Toast.LENGTH_LONG).show() }
+    }
+
     private fun keyMenu() {
         if (engine.running) { Toast.makeText(this, L.tr("Дождись конца сборки"), Toast.LENGTH_SHORT).show(); return }
-        val items = arrayOf(L.tr("Импортировать ключ…"), L.tr("Экспортировать ключ в Загрузки"), L.tr("Создать новый ключ"))
+        val items = arrayOf(L.tr("Импортировать ключ…"), L.tr("Экспортировать ключ в Загрузки"), L.tr("Создать новый общий ключ"),
+            L.tr("Ключ по умолчанию (как в GitHub-сборке)"), L.tr("Ключ только для проекта «${engine.project}»…"))
         AlertDialog.Builder(this).setTitle(L.tr("Ключ подписи"))
-            .setMessage(L.tr("Android ставит обновление только если APK подписан тем же ключом, что и установленное приложение. Подставь ключ, которым подписано твоё приложение (PKCS12 .p12/.pfx или zip из экспорта)."))
             .setItems(items) { _, i ->
                 when (i) {
-                    0 -> try {
-                        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"), REQ_KEY)
-                    } catch (e: Exception) { Toast.makeText(this, L.tr("Нет приложения для выбора файлов"), Toast.LENGTH_LONG).show() }
+                    0 -> pickKeyFile(false)
                     1 -> Thread {
                         val msg = try { "Сохранено: " + ApkShare.export(this, engine.exportKey(), "application/zip") + " — храни как пароль" } catch (e: Exception) { "Не удалось сохранить: ${e.message}" }
                         ui.post { Toast.makeText(this, L.tr(msg), Toast.LENGTH_LONG).show() }
                     }.start()
-                    2 -> AlertDialog.Builder(this).setMessage(L.tr("Создать новый ключ? Обновить уже установленные приложения, подписанные старым ключом, будет нельзя."))
-                        .setPositiveButton(L.tr("Создать")) { _, _ -> engine.resetKey(); com.builder.core.ApkSigner.loadOrCreate(engine.keysDir); Toast.makeText(this, L.tr("Ключ создан"), Toast.LENGTH_SHORT).show() }
+                    2 -> AlertDialog.Builder(this).setMessage(L.tr("Создать новый общий ключ? Обновить уже установленные приложения, подписанные старым ключом, будет нельзя."))
+                        .setPositiveButton(L.tr("Создать")) { _, _ ->
+                            Thread {
+                                val msg = try { "Новый общий ключ: SHA-256 " + engine.newKey(false).take(16) + "…" } catch (e: Exception) { "Не получилось: ${e.message}" }
+                                ui.post { Toast.makeText(this, L.tr(msg), Toast.LENGTH_LONG).show() }
+                            }.start()
+                        }
                         .setNegativeButton(L.tr("Отмена"), null).show()
+                    3 -> Thread {
+                        val msg = try { "Ключ по умолчанию: SHA-256 " + engine.useDefaultKey().take(16) + "…" } catch (e: Exception) { "Не получилось: ${e.message}" }
+                        ui.post { AlertDialog.Builder(this).setMessage(L.tr(msg)).setPositiveButton(L.tr("Ок"), null).show() }
+                    }.start()
+                    4 -> projectKeyMenu()
+                }
+            }.setNegativeButton(L.tr("Закрыть"), null).show()
+    }
+
+    private fun projectKeyMenu() {
+        val has = engine.hasProjectKey()
+        val items = ArrayList<String>()
+        items.add(L.tr("Создать новый ключ для проекта")); items.add(L.tr("Импортировать ключ для проекта…"))
+        if (has) items.add(L.tr("Убрать ключ проекта (вернуться к общему)"))
+        AlertDialog.Builder(this).setTitle(L.tr("Ключ проекта «${engine.project}»") + " · " + engine.keyInfo())
+            .setItems(items.toTypedArray()) { _, i ->
+                when (i) {
+                    0 -> Thread {
+                        val msg = try { "Ключ проекта создан: SHA-256 " + engine.newKey(true).take(16) + "…" } catch (e: Exception) { "Не получилось: ${e.message}" }
+                        ui.post { Toast.makeText(this, L.tr(msg), Toast.LENGTH_LONG).show() }
+                    }.start()
+                    1 -> pickKeyFile(true)
+                    2 -> { engine.dropProjectKey(); Toast.makeText(this, L.tr("Ключ проекта убран"), Toast.LENGTH_SHORT).show() }
                 }
             }.setNegativeButton(L.tr("Закрыть"), null).show()
     }
@@ -418,7 +455,7 @@ class MainActivity : Activity(), EngineListener, TermActions {
 
     private fun finishKeyImport(f: File, password: String, alias: String?) {
         Thread {
-            val msg = try { "Ключ подставлен: SHA-256 " + engine.importKey(f, password, alias).take(16) + "…" } catch (e: Exception) { "Не получилось: ${e.message}" }
+            val msg = try { (if (keyForProject) "Ключ проекта подставлен: SHA-256 " else "Ключ подставлен: SHA-256 ") + engine.importKey(f, password, alias, keyForProject).take(16) + "…" } catch (e: Exception) { "Не получилось: ${e.message}" }
             f.delete()
             ui.post { AlertDialog.Builder(this).setMessage(L.tr(msg)).setPositiveButton(L.tr("Ок"), null).show() }
         }.start()
@@ -444,6 +481,8 @@ class MainActivity : Activity(), EngineListener, TermActions {
         if (r != null && !engine.running && engine.lastError == null) card.show(r, false)
         if (engine.running) { ui.removeCallbacks(ticker); ui.post(ticker); startResources(); startStick() }
     }
+
+    override fun onDestroy() { super.onDestroy(); try { sfx.release() } catch (_: Throwable) { } }
 
     override fun onStop() {
         app.ui = null; app.visible = false
@@ -472,6 +511,7 @@ class MainActivity : Activity(), EngineListener, TermActions {
     override fun onFinish(result: Result?, error: String?, cancelled: Boolean) {
         ui.post {
             this.cancelled = cancelled
+            sfx.play(if (cancelled) "build_cancel" else if (result != null && error == null) "build_ok" else "build_error")
             ui.postDelayed({ if (!engine.running) res.show(false) }, 1400)
             updateControls()
             if (page == 1) history.load(false)
@@ -489,7 +529,7 @@ class MainActivity : Activity(), EngineListener, TermActions {
             wasFixing = engine.fixing
             fixCard.bind(list, engine.fixing)
             updateControls()
-            if (list.isNotEmpty() && !fixShown) { fixShown = true; scroll.postDelayed({ glideTo(fixCard.top, 520) }, 500) }
+            if (list.isNotEmpty() && !fixShown) { fixShown = true; sfx.play("assistant_ask"); scroll.postDelayed({ glideTo(fixCard.top, 520) }, 500) }
             else if (list.isEmpty()) fixShown = false
         }
     }
