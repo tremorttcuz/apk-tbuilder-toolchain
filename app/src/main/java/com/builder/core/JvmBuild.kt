@@ -44,7 +44,12 @@ object Jvm {
                 else -> n.toString()
             }
         }
-        val k = fit(ktReq, "Kotlin"); val j = fit(jvReq, "Java")
+        val k = fit(ktReq, "Kotlin")
+        // ecj на Android обязан получать android.jar через -bootclasspath, а на уровне 9+ эта опция запрещена
+        // («option -bootclasspath not supported at compliance level 9 and above»): Java-код собирается на уровне 1.8, d8 доводит его до minSdk
+        val jReq = jvReq?.let { Gradle.jvmMajor(it) }
+        if (jReq != null && jReq > 8) notes.add("Java $jvReq → 1.8 (компилятор Java на телефоне работает на уровне 8)")
+        val j = "1.8"
         val src = if (ktReq != null || jvReq != null) "из build.gradle" else "по умолчанию"
         return Targets(k, j, "JVM-таргет: Kotlin $k · Java $j ($src)" + if (notes.isNotEmpty()) "; " + notes.joinToString("; ") else "")
     }

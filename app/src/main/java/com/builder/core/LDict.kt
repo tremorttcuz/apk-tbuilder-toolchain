@@ -44,6 +44,7 @@ internal object LDict {
         "для хранилища ", "for keystore ",
         "не открылось: ", "could not be opened: ",
         "хранилище ", "keystore ",
+        " (компилятор Java на телефоне работает на уровне 8)"," (the on-device Java compiler works at level 8)",
         "JVM-таргет: Kotlin ", "JVM target: Kotlin ",
         "(из build.gradle)", "(from build.gradle)",
         " (максимум встроенных компиляторов)", " (maximum of the built-in compilers)",
