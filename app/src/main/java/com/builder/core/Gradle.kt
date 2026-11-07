@@ -123,7 +123,7 @@ object Gradle {
     /** Подставляет `$name`, `${name}`, `${rootProject.ext.name}` и т. п.; неизвестное остаётся как есть. */
     fun substitute(s: String, vars: Map<String, String>): String {
         if ('$' !in s) return s
-        return Regex("""\$\{([^}]+)}|\$([A-Za-z_][\w.]*)""").replace(s) { m ->
+        return Regex("""\$\{([^}]+)\}|\$([A-Za-z_][\w.]*)""").replace(s) { m ->
             val name = (m.groupValues[1].ifEmpty { m.groupValues[2] }).trim()
             val short = name.removePrefix("rootProject.").removePrefix("project.").removePrefix("ext.").removePrefix("extra.")
             vars[name] ?: vars[short] ?: vars[short.substringAfterLast('.')] ?: m.value
@@ -147,7 +147,7 @@ object Gradle {
         val toolchain = Regex("jvmToolchain\\s*\\(\\s*(\\d+)").find(s)?.groupValues?.get(1)
             ?: Regex("JavaLanguageVersion\\.of\\(\\s*(\\d+)").find(s)?.groupValues?.get(1)
         val kt = Regex("\\bjvmTarget\\b\\s*(?:=|\\.set\\(|\\.convention\\()\\s*[\"']?\\s*$VER").find(s)?.groupValues?.get(1)
-            ?: Regex("\\bjvmTarget\\b\\s*=\\s*[\"']?\\$\\{?([A-Za-z_][\\w.]*)}?[\"']?").find(s)?.groupValues?.get(1)?.let { vars[it] }
+            ?: Regex("\\bjvmTarget\\b\\s*=\\s*[\"']?\\$\\{?([A-Za-z_][\\w.]*)\\}?[\"']?").find(s)?.groupValues?.get(1)?.let { vars[it] }
         val jv = Regex("\\b(?:target|source)Compatibility\\b\\s*(?:=|\\.set\\(|\\()?\\s*[\"']?\\s*$VER").findAll(s)
             .mapNotNull { normJvm(it.groupValues[1]) }.maxWithOrNull(compareBy { jvmMajor(it) })
         return (normJvm(kt) ?: normJvm(toolchain)) to (jv ?: normJvm(toolchain))
