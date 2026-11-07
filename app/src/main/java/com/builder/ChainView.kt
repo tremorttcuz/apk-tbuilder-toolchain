@@ -417,6 +417,9 @@ class StageRow(ctx: Context, val stage: Stage, first: Boolean, last: Boolean, pr
         updateTime()
     }
 
+    /** Кадр таймера: время и полоска. Полоска шага без собственного прогресса (Kotlin, dex) идёт по оценке времени и обязана двигаться, даже когда шаг молчит. */
+    fun tick() { updateTime(); if (stage.state == St.RUNNING && shown == St.RUNNING) live() }
+
     fun updateTime() {
         val s = stage
         time.text = when (s.state) {
@@ -730,7 +733,7 @@ class ChainView(ctx: Context, private val onActive: (View) -> Unit, private val 
         refreshHeaders()
     }
 
-    fun tick() { for (i in stages.indices) if (stages[i].state == St.RUNNING) byIndex[i]?.updateTime() }
+    fun tick() { for (i in stages.indices) if (stages[i].state == St.RUNNING) byIndex[i]?.tick() }
 
     /**
      * Финал: волна света пробегает по рейке сверху вниз с постоянной скоростью
